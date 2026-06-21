@@ -1,6 +1,7 @@
-import { AudioPlayerStatus, createAudioPlayer, createAudioResource, joinVoiceChannel, NoSubscriberBehavior, VoiceConnectionStatus, entersState } from '@discordjs/voice';
-import { createWriteStream, existsSync, mkdirSync } from 'fs';
+import { AudioPlayerStatus, createAudioPlayer, createAudioResource, joinVoiceChannel, NoSubscriberBehavior, StreamType, VoiceConnectionStatus, entersState } from '@discordjs/voice';
+import { createWriteStream, existsSync, mkdirSync, rmSync, statSync } from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import play from 'play-dl';
 import { loadSavedChannels, saveSavedChannels } from '../data/persistentStore.js';
@@ -35,6 +36,18 @@ function safeFileName(name) {
 function isSupportedAudioAttachment(attachment) {
   const ext = path.extname(attachment.name || '').toLowerCase();
   return AUDIO_EXTENSIONS.has(ext) || attachment.contentType?.startsWith('audio/');
+}
+
+async function fetchAudioStream(url) {
+  const response = await fetch(url, {
+    headers: { 'User-Agent': 'MyMelody/1.0 Discord music bot' },
+    redirect: 'follow',
+  });
+  if (!response.ok || !response.body) {
+    throw new Error(`Audio source returned HTTP ${response.status}.`);
+  }
+
+  return Readable.fromWeb(response.body);
 }
 
 export class PlayerManager {
@@ -143,14 +156,17 @@ export class GuildPlayer {
   }
 
   disconnect() {
+    this.queue = [];
+    this.history = [];
+    this.current = null;
+    this.currentResource = null;
+    this.status = 'idle';
+    this.player.stop(true);
+
     if (this.connection) {
       this.connection.destroy();
       this.connection = null;
     }
-    this.queue = [];
-    this.current = null;
-    this.currentResource = null;
-    this.status = 'idle';
   }
 
   setVolume(volume) {
@@ -167,7 +183,7 @@ export class GuildPlayer {
         title: info.video_details.title,
         url: query,
         source: query,
-        type: 'stream',
+        type: 'youtube',
       };
     }
 
@@ -176,12 +192,13 @@ export class GuildPlayer {
         title: query,
         url: query,
         source: query,
-        type: 'stream',
+        type: 'url',
       };
     }
 
-    const filePath = path.join(STORAGE_DIR, query);
-    if (existsSync(filePath)) {
+    const filePath = path.resolve(STORAGE_DIR, query);
+    const isInsideStorage = filePath.startsWith(`${STORAGE_DIR}${path.sep}`);
+    if (isInsideStorage && existsSync(filePath) && statSync(filePath).isFile()) {
       return {
         title: query,
         url: filePath,
@@ -197,7 +214,7 @@ export class GuildPlayer {
         title: item.title,
         url: item.url,
         source: item.url,
-        type: 'stream',
+        type: 'youtube',
       };
     }
 
@@ -216,7 +233,12 @@ export class GuildPlayer {
       throw new Error(`Failed to download attachment (${response.status}).`);
     }
 
-    await pipeline(response.body, createWriteStream(filePath));
+    try {
+      await pipeline(Readable.fromWeb(response.body), createWriteStream(filePath));
+    } catch (error) {
+      rmSync(filePath, { force: true });
+      throw new Error(`Failed to save attachment: ${error.message}`, { cause: error });
+    }
 
     return {
       title: attachment.name || fileName,
@@ -233,6 +255,15 @@ export class GuildPlayer {
       return resource;
     }
 
+    if (track.type === 'url') {
+      const resource = createAudioResource(await fetchAudioStream(track.source), {
+        inputType: StreamType.Arbitrary,
+        inlineVolume: true,
+      });
+      resource.volume.setVolume(this.volume);
+      return resource;
+    }
+
     const stream = await play.stream(track.source, { quality: 2 });
     const resource = createAudioResource(stream.stream, {
       inputType: stream.type,
@@ -245,7 +276,7 @@ export class GuildPlayer {
   async enqueue(query) {
     const track = await this.resolveTrack(query);
     this.queue.push(track);
-    if (this.status !== 'playing') {
+    if (this.status === 'idle') {
       await this.playNext();
     }
     return track;
@@ -254,7 +285,7 @@ export class GuildPlayer {
   async enqueueAttachment(attachment) {
     const track = await this.resolveAttachment(attachment);
     this.queue.push(track);
-    if (this.status !== 'playing') {
+    if (this.status === 'idle') {
       await this.playNext();
     }
     return track;
@@ -294,16 +325,22 @@ export class GuildPlayer {
   }
 
   skip() {
-    this.player.stop();
+    if (!this.current || !this.player.stop()) {
+      throw new Error('Nothing is currently playing.');
+    }
   }
 
   pause() {
-    this.player.pause();
+    if (this.status !== 'playing' || !this.player.pause()) {
+      throw new Error('Nothing is currently playing.');
+    }
     this.status = 'paused';
   }
 
   resume() {
-    this.player.unpause();
+    if (this.status !== 'paused' || !this.player.unpause()) {
+      throw new Error('Playback is not paused.');
+    }
     this.status = 'playing';
   }
 
@@ -330,15 +367,14 @@ export class GuildPlayer {
 
   async tts(message) {
     const url = createGoogleTtsUrl(message);
-    const stream = await play.stream(url);
-    const resource = createAudioResource(stream.stream, {
-      inputType: stream.type,
+    const resource = createAudioResource(await fetchAudioStream(url), {
+      inputType: StreamType.Arbitrary,
       inlineVolume: true,
     });
     resource.volume.setVolume(this.volume);
     this.player.play(resource);
     this.currentResource = resource;
-    this.current = { title: `TTS: ${message}`, url, source: url, type: 'stream' };
+    this.current = { title: `TTS: ${message}`, url, source: url, type: 'url' };
     this.status = 'playing';
   }
 }
