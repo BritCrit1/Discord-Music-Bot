@@ -1,0 +1,23 @@
+{
+  "name": "my-melody",
+  "version": "1.0.0",
+  "description": "My Melody Discord music bot with 24/7 connect, TTS, local file support, YouTube playback, and voice control embed.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy": "node src/deployCommands.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "@discordjs/rest": "^2.6.1",
+    "discord-api-types": "^0.37.33",
+    "discord.js": "^14.15.0",
+    "dotenv": "^16.3.1",
+    "play-dl": "^1.9.7",
+    "opusscript": "^0.1.1"
+  }
+}
